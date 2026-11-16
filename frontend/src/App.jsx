@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
 
 export default function App() {
   const [message, setMessage] = useState('Connecting to the backend…');
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/hello`)
+    fetch(`${API_URL}/`)
       .then((response) => {
         if (!response.ok) throw new Error('The server returned an error.');
         return response.json();

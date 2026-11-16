@@ -7,7 +7,7 @@ const port = process.env.PORT || 3001;
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 app.use(express.json());
 
-app.get('', (_request, response) => {
+app.get('/', (_request, response) => {
   response.json({ message: 'It works! This message came from the backend.' });
 });
 
