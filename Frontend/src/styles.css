@@ -13,3 +13,24 @@
 .image-hint{margin:0;font-size:9px;color:#91978e}
 .link-button{border:0;background:none;padding:4px 0 0;color:#5c765d;font:600 10px 'DM Sans',sans-serif;cursor:pointer;text-decoration:underline}
 .product-photo{object-fit:cover;padding:0;border:1px solid #e5e9e2}
+.photo-button,.preview-button{padding:0;border:0;background:none;cursor:zoom-in;display:block;border-radius:8px}
+.photo-button{flex:none}
+.photo-button .product-mark{display:block;transition:box-shadow .15s ease}
+.photo-button:hover .product-mark{box-shadow:0 0 0 2px #cfdccf}
+.photo-button:focus-visible,.preview-button:focus-visible{outline:2px solid #8ca991;outline-offset:2px}
+.preview-button{width:100%;height:100%}
+.lightbox{border:0;padding:0;background:transparent;max-width:none;max-height:none;overflow:visible}
+.lightbox::backdrop{background:rgba(20,26,20,.72)}
+.lightbox[open]{animation:lightbox-in .16s ease-out}
+.lightbox[open]::backdrop{animation:lightbox-fade .16s ease-out}
+.lightbox-figure{position:relative;margin:0;background:#fff;border-radius:12px;padding:10px;box-shadow:0 24px 64px rgba(0,0,0,.35)}
+.lightbox-stage{width:min(88vw,900px);height:min(76vh,680px);border-radius:8px;background:#f6f7f4;display:grid;place-items:center;overflow:hidden}
+.lightbox-stage img{width:100%;height:100%;object-fit:contain}
+.lightbox-figure figcaption{font:700 13px Manrope,sans-serif;color:#283128;padding:10px 4px 2px}
+.lightbox-close{position:absolute;top:18px;right:18px;width:34px;height:34px;border-radius:50%;border:0;background:#fff;color:#283128;font-size:20px;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+.lightbox-close:hover{background:#eef4ee}
+.lightbox-close:focus-visible{outline:2px solid #8ca991;outline-offset:2px}
+@keyframes lightbox-in{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
+@keyframes lightbox-fade{from{opacity:0}to{opacity:1}}
+@media(max-width:650px){.lightbox-stage{width:92vw;height:70vh}}
+@media(prefers-reduced-motion:reduce){.lightbox[open],.lightbox[open]::backdrop{animation:none}}
