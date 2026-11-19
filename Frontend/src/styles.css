@@ -34,3 +34,5 @@
 @keyframes lightbox-fade{from{opacity:0}to{opacity:1}}
 @media(max-width:650px){.lightbox-stage{width:92vw;height:70vh}}
 @media(prefers-reduced-motion:reduce){.lightbox[open],.lightbox[open]::backdrop{animation:none}}
+/* Keep absolutely positioned children (the screen-reader "Actions" header) inside the scroll box so the page never scrolls sideways on phones. */
+.table-wrap{position:relative}
