@@ -4,9 +4,14 @@ CREATE TABLE IF NOT EXISTS items (
   category VARCHAR(50) NOT NULL,
   quantity INTEGER NOT NULL CHECK (quantity >= 0),
   price NUMERIC(12, 2) NOT NULL CHECK (price >= 0),
+  image_key VARCHAR(255),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- The image file lives in S3; only its object key is stored here.
+-- Adds the column to databases created before image uploads existed.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS image_key VARCHAR(255);
 
 INSERT INTO items (id, name, category, quantity, price)
 VALUES

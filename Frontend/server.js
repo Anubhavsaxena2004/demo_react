@@ -38,7 +38,7 @@ const server = createServer((req, res) => {
         'x-forwarded-for': req.socket.remoteAddress || '',
         'x-forwarded-proto': req.socket.encrypted ? 'https' : 'http',
       },
-      timeout: 15_000,
+      timeout: 60_000, // long enough for a 5 MB photo upload on a slow connection
     }, (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
       upstreamRes.pipe(res);

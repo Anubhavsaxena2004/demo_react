@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const API = '/api/items';
 const blankItem = { name: '', category: '', quantity: '', price: '' };
+const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+const maxImageBytes = 5 * 1024 * 1024;
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
 async function request(url, options) {
@@ -33,6 +35,20 @@ function App() {
   const [apiConnected, setApiConnected] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [imageFile, setImageFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [removeImage, setRemoveImage] = useState(false);
+  const fileInput = useRef(null);
+
+  useEffect(() => {
+    if (!imageFile) {
+      setPreviewUrl(null);
+      return undefined;
+    }
+    const url = URL.createObjectURL(imageFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
 
   async function loadItems() {
     try {
@@ -57,10 +73,31 @@ function App() {
 
   const totalUnits = items.reduce((sum, item) => sum + item.quantity, 0);
   const inventoryValue = items.reduce((sum, item) => sum + item.quantity * item.price, 0);
+  const editingItem = items.find((item) => item.id === editingId);
+  const shownImage = previewUrl || (!removeImage && editingItem?.imageUrl) || null;
+
+  function clearImageChoice() {
+    setImageFile(null);
+    if (fileInput.current) fileInput.current.value = '';
+  }
+
+  function chooseImage(event) {
+    const file = event.target.files?.[0] || null;
+    setError('');
+    if (file && (!imageTypes.includes(file.type) || file.size > maxImageBytes)) {
+      setError(file.size > maxImageBytes ? 'Images must be 5 MB or smaller.' : 'Choose a JPEG, PNG or WebP image.');
+      clearImageChoice();
+      return;
+    }
+    setImageFile(file);
+    if (file) setRemoveImage(false);
+  }
 
   function startEdit(item) {
     setEditingId(item.id);
     setForm({ name: item.name, category: item.category, quantity: String(item.quantity), price: String(item.price) });
+    clearImageChoice();
+    setRemoveImage(false);
     setError('');
     document.querySelector('#item-name')?.focus();
   }
@@ -68,26 +105,40 @@ function App() {
   function resetForm() {
     setForm(blankItem);
     setEditingId(null);
+    clearImageChoice();
+    setRemoveImage(false);
   }
 
+  // Save the product first, then send the photo: the backend needs the product's id to file the image under it in S3.
   async function handleSubmit(event) {
     event.preventDefault();
     setSaving(true);
     setError('');
     const payload = { ...form, quantity: Number(form.quantity), price: Number(form.price) };
+    let saved = null;
+    let failure = '';
     try {
-      await request(editingId ? `${API}/${editingId}` : API, {
+      saved = await request(editingId ? `${API}/${editingId}` : API, {
         method: editingId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      resetForm();
-      await loadItems();
+      if (imageFile) {
+        const body = new FormData();
+        body.append('image', imageFile);
+        await request(`${API}/${saved.id}/image`, { method: 'POST', body });
+      } else if (removeImage) {
+        await request(`${API}/${saved.id}/image`, { method: 'DELETE' });
+      }
     } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
+      failure = saved ? `Product saved, but the photo could not be updated: ${err.message}` : err.message;
     }
+    // If only the photo failed, stay on the saved product so a retry updates it instead of creating a duplicate.
+    if (!failure) resetForm();
+    else if (saved) setEditingId(saved.id);
+    if (saved) await loadItems();
+    if (failure) setError(failure);
+    setSaving(false);
   }
 
   async function deleteItem(item) {
@@ -128,6 +179,19 @@ function App() {
               <label htmlFor="item-name">Product name</label><input id="item-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Ceramic mug" maxLength="80" required />
               <label htmlFor="category">Category</label><input id="category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. Home & living" maxLength="50" required />
               <div className="field-row"><div><label htmlFor="quantity">Quantity</label><input id="quantity" type="number" min="0" step="1" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="0" required /></div><div><label htmlFor="price">Unit price</label><div className="price-input"><span>$</span><input id="price" type="number" min="0" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0.00" required /></div></div></div>
+              <label htmlFor="item-image">Product photo <span className="optional">(optional)</span></label>
+              <div className="image-field">
+                <div className="image-preview">{shownImage ? <img src={shownImage} alt="Product photo preview" /> : <span>No photo</span>}</div>
+                <div className="image-controls">
+                  <input ref={fileInput} id="item-image" className="file-input" type="file" accept={imageTypes.join(',')} onChange={chooseImage} />
+                  <p className="image-hint">JPEG, PNG or WebP, up to 5 MB</p>
+                  {imageFile
+                    ? <button className="link-button" type="button" onClick={clearImageChoice}>Clear selection</button>
+                    : editingItem?.imageUrl && (removeImage
+                      ? <button className="link-button" type="button" onClick={() => setRemoveImage(false)}>Keep current photo</button>
+                      : <button className="link-button" type="button" onClick={() => setRemoveImage(true)}>Remove photo</button>)}
+                </div>
+              </div>
               <button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving…' : <>{editingId ? 'Save changes' : 'Add to inventory'} <span>→</span></>}</button>
               {editingId && <button className="cancel-button" type="button" onClick={resetForm}>Cancel editing</button>}
             </form>
@@ -138,7 +202,7 @@ function App() {
             <div className="inventory-heading"><div><h2>All products <span className="count-pill">{items.length}</span></h2><p>A complete list of everything you’re tracking.</p></div><label className="search-box"><Icon name="search" /><input aria-label="Search products" placeholder="Search products..." value={query} onChange={(e) => setQuery(e.target.value)} /></label></div>
             {error && <div className="error-banner" role="alert">{error}</div>}
             <div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>CATEGORY</th><th>QUANTITY</th><th>UNIT PRICE</th><th>VALUE</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-              {loading ? <tr><td colSpan="6" className="table-message">Loading your inventory…</td></tr> : filteredItems.length === 0 ? <tr><td colSpan="6" className="table-message">{query ? 'No products match your search.' : 'No products yet. Add your first one to get started.'}</td></tr> : filteredItems.map((item, index) => <tr key={item.id}><td><div className="product-cell"><span className={`product-mark mark-${index % 4}`}>{item.name.trim().charAt(0).toUpperCase()}</span><span className="product-name">{item.name}</span></div></td><td><span className="category-tag">{item.category}</span></td><td><span className="quantity">{item.quantity}</span> <span className="unit-label">units</span></td><td>{money.format(item.price)}</td><td className="value-cell">{money.format(item.quantity * item.price)}</td><td><div className="actions"><button className="icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => startEdit(item)}><Icon name="edit" /></button><button className="icon-button delete-button" aria-label={`Delete ${item.name}`} title="Delete" onClick={() => deleteItem(item)}><Icon name="trash" /></button></div></td></tr>)}
+              {loading ? <tr><td colSpan="6" className="table-message">Loading your inventory…</td></tr> : filteredItems.length === 0 ? <tr><td colSpan="6" className="table-message">{query ? 'No products match your search.' : 'No products yet. Add your first one to get started.'}</td></tr> : filteredItems.map((item, index) => <tr key={item.id}><td><div className="product-cell">{item.imageUrl ? <img className="product-mark product-photo" src={item.imageUrl} alt="" loading="lazy" /> : <span className={`product-mark mark-${index % 4}`}>{item.name.trim().charAt(0).toUpperCase()}</span>}<span className="product-name">{item.name}</span></div></td><td><span className="category-tag">{item.category}</span></td><td><span className="quantity">{item.quantity}</span> <span className="unit-label">units</span></td><td>{money.format(item.price)}</td><td className="value-cell">{money.format(item.quantity * item.price)}</td><td><div className="actions"><button className="icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => startEdit(item)}><Icon name="edit" /></button><button className="icon-button delete-button" aria-label={`Delete ${item.name}`} title="Delete" onClick={() => deleteItem(item)}><Icon name="trash" /></button></div></td></tr>)}
             </tbody></table></div>
             <footer className="table-footer"><span>Showing <strong>{filteredItems.length}</strong> of <strong>{items.length}</strong> products</span><span className={`api-status ${apiConnected ? '' : 'api-offline'}`}><i /> {apiConnected ? 'API and database connected' : 'Service unavailable'}</span></footer>
           </section>
