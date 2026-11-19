@@ -79,6 +79,20 @@ const server = createServer((req, res) => {
   createReadStream(filePath).on('error', () => res.writeHead(500).end('Unable to read frontend file')).pipe(res);
 });
 
+// Links to a retired port (e.g. :8080) get a redirect to the main address, so old bookmarks and open tabs recover on reload.
+const redirectPort = Number(process.env.REDIRECT_PORT || 0);
+if (redirectPort) {
+  createServer((req, res) => {
+    const hostname = (req.headers.host || '').replace(/:\d+$/, '');
+    if (!/^[a-z0-9.-]+$/i.test(hostname)) {
+      res.writeHead(400).end('Bad request');
+      return;
+    }
+    const location = `http://${hostname}${port === 80 ? '' : `:${port}`}${req.url || '/'}`;
+    res.writeHead(301, { location, 'cache-control': 'max-age=3600' }).end();
+  }).listen(redirectPort, host, () => console.log(`Redirecting port ${redirectPort} -> ${port}`));
+}
+
 server.listen(port, host, () => console.log(`Frontend listening on http://${host}:${port}; API proxy -> ${target.origin}`));
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 process.on('SIGINT', () => server.close(() => process.exit(0)));
