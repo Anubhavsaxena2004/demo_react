@@ -3,7 +3,7 @@
 An inventory app where each product can have a photo. The browser only ever talks to the frontend: the frontend Node server serves the built React app and proxies `/api` requests to the private backend. The backend stores product data in Amazon RDS for PostgreSQL and photos in a private S3 bucket.
 
 ```text
-Browser ──HTTP :8080──> Frontend EC2 ──private HTTP :4000──> Backend EC2 ──private TLS :5432──> RDS PostgreSQL
+Browser ──HTTP :80────> Frontend EC2 ──private HTTP :4000──> Backend EC2 ──private TLS :5432──> RDS PostgreSQL
                                                                  └────────HTTPS (IAM role)────> S3 bucket (private)
 ```
 
@@ -51,7 +51,7 @@ The bucket has Block Public Access turned on and no bucket policy, so direct S3 
   ```
 
 - **RDS for PostgreSQL**, not publicly accessible, in the same VPC, with "Connect to an EC2 compute resource" pointed at the backend instance so only the backend can reach port 5432.
-- **Security groups:** frontend allows `8080` from the internet; backend allows `4000` only from the frontend's security group.
+- **Security groups:** frontend allows `80` (HTTP) from the internet; backend allows `4000` only from the frontend's security group.
 
 ## 1. Database (RDS), from the backend EC2
 
@@ -124,11 +124,23 @@ Create `/etc/crud-frontend.env`:
 
 ```bash
 HOST=0.0.0.0
-PORT=8080
+PORT=80
 BACKEND_URL=http://BACKEND_PRIVATE_IP:4000
 ```
 
-Run it as a systemd service (`ExecStart=/usr/bin/node /opt/crud/Frontend/server.js`). Users browse to `http://FRONTEND_PUBLIC_IP:8080`. The backend address is never placed in the React bundle.
+Run it as a systemd service as the unprivileged `ubuntu` user. Ports below 1024 need a capability, so grant only that one instead of running Node as root:
+
+```ini
+[Service]
+User=ubuntu
+EnvironmentFile=/etc/crud-frontend.env
+ExecStart=/usr/bin/node /opt/crud/Frontend/server.js
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+```
+
+Users browse to `http://FRONTEND_PUBLIC_IP` (no port needed). Clicking a product photo opens it full size. The backend address is never placed in the React bundle.
 
 ## Updating a running deployment
 

@@ -39,6 +39,16 @@ function App() {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [removeImage, setRemoveImage] = useState(false);
   const fileInput = useRef(null);
+  const [zoomed, setZoomed] = useState(null);
+  const lightbox = useRef(null);
+
+  // A native <dialog> gives Escape-to-close, focus trapping and a backdrop for free.
+  useEffect(() => {
+    const dialog = lightbox.current;
+    if (!dialog) return;
+    if (zoomed && !dialog.open) dialog.showModal();
+    if (!zoomed && dialog.open) dialog.close();
+  }, [zoomed]);
 
   useEffect(() => {
     if (!imageFile) {
@@ -181,7 +191,7 @@ function App() {
               <div className="field-row"><div><label htmlFor="quantity">Quantity</label><input id="quantity" type="number" min="0" step="1" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="0" required /></div><div><label htmlFor="price">Unit price</label><div className="price-input"><span>$</span><input id="price" type="number" min="0" step="0.01" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} placeholder="0.00" required /></div></div></div>
               <label htmlFor="item-image">Product photo <span className="optional">(optional)</span></label>
               <div className="image-field">
-                <div className="image-preview">{shownImage ? <img src={shownImage} alt="Product photo preview" /> : <span>No photo</span>}</div>
+                <div className="image-preview">{shownImage ? <button className="preview-button" type="button" aria-label="View photo larger" onClick={() => setZoomed({ src: shownImage, name: form.name.trim() || 'Product photo' })}><img src={shownImage} alt="Product photo preview" /></button> : <span>No photo</span>}</div>
                 <div className="image-controls">
                   <input ref={fileInput} id="item-image" className="file-input" type="file" accept={imageTypes.join(',')} onChange={chooseImage} />
                   <p className="image-hint">JPEG, PNG or WebP, up to 5 MB</p>
@@ -202,13 +212,22 @@ function App() {
             <div className="inventory-heading"><div><h2>All products <span className="count-pill">{items.length}</span></h2><p>A complete list of everything you’re tracking.</p></div><label className="search-box"><Icon name="search" /><input aria-label="Search products" placeholder="Search products..." value={query} onChange={(e) => setQuery(e.target.value)} /></label></div>
             {error && <div className="error-banner" role="alert">{error}</div>}
             <div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>CATEGORY</th><th>QUANTITY</th><th>UNIT PRICE</th><th>VALUE</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-              {loading ? <tr><td colSpan="6" className="table-message">Loading your inventory…</td></tr> : filteredItems.length === 0 ? <tr><td colSpan="6" className="table-message">{query ? 'No products match your search.' : 'No products yet. Add your first one to get started.'}</td></tr> : filteredItems.map((item, index) => <tr key={item.id}><td><div className="product-cell">{item.imageUrl ? <img className="product-mark product-photo" src={item.imageUrl} alt="" loading="lazy" /> : <span className={`product-mark mark-${index % 4}`}>{item.name.trim().charAt(0).toUpperCase()}</span>}<span className="product-name">{item.name}</span></div></td><td><span className="category-tag">{item.category}</span></td><td><span className="quantity">{item.quantity}</span> <span className="unit-label">units</span></td><td>{money.format(item.price)}</td><td className="value-cell">{money.format(item.quantity * item.price)}</td><td><div className="actions"><button className="icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => startEdit(item)}><Icon name="edit" /></button><button className="icon-button delete-button" aria-label={`Delete ${item.name}`} title="Delete" onClick={() => deleteItem(item)}><Icon name="trash" /></button></div></td></tr>)}
+              {loading ? <tr><td colSpan="6" className="table-message">Loading your inventory…</td></tr> : filteredItems.length === 0 ? <tr><td colSpan="6" className="table-message">{query ? 'No products match your search.' : 'No products yet. Add your first one to get started.'}</td></tr> : filteredItems.map((item, index) => <tr key={item.id}><td><div className="product-cell">{item.imageUrl ? <button className="photo-button" type="button" aria-label={`View photo of ${item.name}`} title="View photo" onClick={() => setZoomed({ src: item.imageUrl, name: item.name })}><img className="product-mark product-photo" src={item.imageUrl} alt="" loading="lazy" /></button> :<span className={`product-mark mark-${index % 4}`}>{item.name.trim().charAt(0).toUpperCase()}</span>}<span className="product-name">{item.name}</span></div></td><td><span className="category-tag">{item.category}</span></td><td><span className="quantity">{item.quantity}</span> <span className="unit-label">units</span></td><td>{money.format(item.price)}</td><td className="value-cell">{money.format(item.quantity * item.price)}</td><td><div className="actions"><button className="icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => startEdit(item)}><Icon name="edit" /></button><button className="icon-button delete-button" aria-label={`Delete ${item.name}`} title="Delete" onClick={() => deleteItem(item)}><Icon name="trash" /></button></div></td></tr>)}
             </tbody></table></div>
             <footer className="table-footer"><span>Showing <strong>{filteredItems.length}</strong> of <strong>{items.length}</strong> products</span><span className={`api-status ${apiConnected ? '' : 'api-offline'}`}><i /> {apiConnected ? 'API and database connected' : 'Service unavailable'}</span></footer>
           </section>
         </section>
         <footer className="page-footer"><span>Stockroom <span>·</span> A little more organized, every day.</span><span>Made for the details.</span></footer>
       </div>
+      <dialog ref={lightbox} className="lightbox" aria-label={zoomed ? `Photo of ${zoomed.name}` : 'Product photo'} onClose={() => setZoomed(null)} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
+        {zoomed && (
+          <figure className="lightbox-figure">
+            <div className="lightbox-stage"><img src={zoomed.src} alt={`Photo of ${zoomed.name}`} /></div>
+            <figcaption>{zoomed.name}</figcaption>
+            <button className="lightbox-close" type="button" aria-label="Close photo" onClick={() => lightbox.current?.close()}>×</button>
+          </figure>
+        )}
+      </dialog>
     </main>
   );
 }
