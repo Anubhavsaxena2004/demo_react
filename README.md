@@ -140,7 +140,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ```
 
-Users browse to `http://FRONTEND_PUBLIC_IP` (no port needed). Clicking a product photo opens it full size. The backend address is never placed in the React bundle.
+Users browse to `http://FRONTEND_PUBLIC_IP` (no port needed). If the site previously ran on another port, add `REDIRECT_PORT=8080` to the env file (and keep that port open) so old links get a `301` redirect to the new address. Clicking a product photo opens it full size. The backend address is never placed in the React bundle.
 
 ## Updating a running deployment
 
