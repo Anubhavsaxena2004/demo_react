@@ -12,6 +12,9 @@ Browser ──HTTP :80────> Frontend EC2 ──private HTTP :4000──>
 | `Frontend/` | Frontend EC2 | React static build + Node HTTP server/proxy |
 | `backend/` | Backend EC2 | Express CRUD API, photo upload to S3 |
 | `database/` | RDS (applied from the backend EC2) | Schema and sample rows |
+| `infra/` | AWS CloudFormation | The same app on a highly available three-tier architecture, built from one template |
+
+> **CloudFormation version:** [`infra/`](infra/README.md) deploys this app behind two load balancers with Auto Scaling groups in two Availability Zones, Multi-AZ RDS, S3, an SQS + DynamoDB activity feed and Secrets Manager. The step-by-step PDF guide in [`docs/`](docs/Stockroom-AWS-CloudFormation-Guide.pdf) covers deploying, building by hand, demonstrating and shutting it down. The rest of this README describes the hand-built three-server version.
 
 ## How a photo upload works
 
@@ -33,6 +36,7 @@ The bucket has Block Public Access turned on and no bucket policy, so direct S3 
 | GET | `/api/items/:id/image` | Stream a product photo from S3 |
 | DELETE | `/api/items/:id/image` | Remove a product photo |
 | GET | `/api/health` | Check the API and database connection |
+| GET | `/api/activity` | Recent changes from the SQS → DynamoDB activity feed (`503` when not configured) |
 
 ## AWS resources
 
@@ -108,7 +112,15 @@ Run it as a systemd service (`EnvironmentFile=/etc/crud-backend.env`, `ExecStart
 curl http://BACKEND_PRIVATE_IP:4000/api/health
 ```
 
-The response should be `{"status":"ok","database":"connected"}`.
+The response should be `{"status":"ok","database":"connected","instance":null}`. `instance` shows the EC2 ID and Availability Zone when `INSTANCE_ID` and `AVAILABILITY_ZONE` are set.
+
+Optional settings, which the CloudFormation stack uses:
+
+| Variable | Effect |
+| --- | --- |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_SECRET_ARN` | Use instead of `DATABASE_URL`: the login is read from Secrets Manager at startup, so no password is stored on the server |
+| `ACTIVITY_QUEUE_URL`, `ACTIVITY_TABLE` | Turn on the activity feed: each change is queued in SQS, a worker in the API stores it in DynamoDB, and `GET /api/activity` lists recent events. Without them the endpoint returns `503` and the app hides the panel |
+| `INSTANCE_ID`, `AVAILABILITY_ZONE` | Shown in the app's "Served by" strip so you can see load balancing |
 
 ## 3. Frontend EC2
 

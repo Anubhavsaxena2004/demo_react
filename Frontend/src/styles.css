@@ -36,3 +36,27 @@
 @media(prefers-reduced-motion:reduce){.lightbox[open],.lightbox[open]::backdrop{animation:none}}
 /* Keep absolutely positioned children (the screen-reader "Actions" header) inside the scroll box so the page never scrolls sideways on phones. */
 .table-wrap{position:relative}
+/* "Served by" strip and activity feed: only rendered on the CloudFormation stack. */
+.served-by{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;background:#fff;border:1px solid #e9ece6;border-radius:11px;padding:10px 16px;margin:0 0 17px;font-size:10px;color:#838a81}
+.served-label{font-size:8px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:#80907c}
+.server-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;background:#f6f8f5;border-radius:6px;padding:5px 8px}
+.server-tier{font-weight:600;color:#6f786d}
+.server-chip code,.activity-meta code{font:600 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#365b43;overflow-wrap:anywhere}
+.server-zone{background:#edf2f5;color:#5a8294;border-radius:4px;padding:1px 5px;font-size:9px}
+.served-arrow{color:#b5b9b2}
+.served-refresh{margin-left:auto;padding:0}
+.served-refresh:disabled{cursor:wait;opacity:.6}
+.activity-card{background:#fff;border:1px solid #e9ece6;border-radius:11px;margin-top:17px;padding:19px 20px 10px}
+.activity-card h2{font-family:Manrope,sans-serif;font-size:14px;font-weight:700;letter-spacing:-.2px;margin:0}
+.activity-note{font-size:10px;color:#959b93;margin:4px 0 12px}
+.activity-empty{font-size:10px;color:#8b9288;margin:0;padding:12px 0 10px;border-top:1px solid #f0f1ee}
+.activity-list{list-style:none;margin:0;padding:0}
+.activity-list li{display:grid;grid-template-columns:7px minmax(0,1fr) auto;align-items:center;gap:4px 10px;padding:9px 0;border-top:1px solid #f0f1ee;font-size:10px;color:#687066}
+.activity-text{min-width:0;overflow-wrap:anywhere}
+.activity-text strong{font-weight:600;color:#343c33}
+.activity-meta{font-size:9px;color:#a0a69d;text-align:right}
+.activity-meta code{font-size:9px;color:#60695f;overflow-wrap:normal;white-space:nowrap}
+.activity-dot{height:7px;width:7px;border-radius:50%;background:#65a778}
+.dot-updated,.dot-photo-added{background:#5a8294}
+.dot-deleted,.dot-photo-removed{background:#c26657}
+@media(max-width:650px){.served-refresh{margin-left:0}.activity-card{padding:16px 16px 8px}.activity-list li{grid-template-columns:7px minmax(0,1fr)}.activity-meta{grid-column:2;text-align:left}}

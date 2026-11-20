@@ -9,6 +9,11 @@ const dist = path.join(here, 'dist');
 const host = process.env.HOST || '0.0.0.0';
 const port = Number(process.env.PORT || 8080);
 const backendUrl = process.env.BACKEND_URL;
+// On the CloudFormation stack each web server labels API responses with its own ID, so the app can show
+// which web server and which API server answered (refresh to watch the load balancers switch between them).
+const instanceHeaders = process.env.INSTANCE_ID
+  ? { 'x-web-instance': process.env.INSTANCE_ID, 'x-web-zone': process.env.AVAILABILITY_ZONE || '' }
+  : {};
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8', '.html': 'text/html; charset=utf-8', '.ico': 'image/x-icon',
   '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
@@ -40,7 +45,7 @@ const server = createServer((req, res) => {
       },
       timeout: 60_000, // long enough for a 5 MB photo upload on a slow connection
     }, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+      res.writeHead(upstreamRes.statusCode || 502, { ...upstreamRes.headers, ...instanceHeaders });
       upstreamRes.pipe(res);
     });
     upstream.on('timeout', () => upstream.destroy(new Error('Backend request timed out')));

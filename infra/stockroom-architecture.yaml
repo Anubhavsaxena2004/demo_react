@@ -1,0 +1,674 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Stockroom inventory app on a highly available three-tier AWS architecture. VPC across two Availability Zones;
+  public ALB -> web Auto Scaling group -> internal ALB -> API Auto Scaling group -> Multi-AZ RDS PostgreSQL;
+  S3 for product photos, SQS + DynamoDB for the activity feed, Secrets Manager for database logins and
+  Session Manager for shell access (no SSH, no public IPs on servers).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Database }
+        Parameters: [DBMasterPassword, DBMasterUsername, DBName, DBInstanceClass, DBMultiAZ, DBEngineVersion]
+      - Label: { default: Servers }
+        Parameters: [InstanceType, UbuntuAmiId, MinSize, DesiredCapacity, MaxSize, CpuTargetPercent]
+      - Label: { default: Application source }
+        Parameters: [RepoUrl, RepoBranch]
+    ParameterLabels:
+      DBMasterPassword: { default: RDS master password }
+
+Parameters:
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 64
+    AllowedPattern: '[^/@"'' \\]*'
+    ConstraintDescription: 8 to 64 characters, without / @ " ' \ or spaces.
+    Description: Password for the RDS master user. Stored in Secrets Manager; the app itself uses a separate, generated login.
+  DBMasterUsername:
+    Type: String
+    Default: postgres
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_]{0,15}'
+  DBName:
+    Type: String
+    Default: crud_demo
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_]{0,62}'
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DBMultiAZ:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: A standby copy of the database in the second Availability Zone with automatic failover. 'false' halves the database cost.
+  DBEngineVersion:
+    Type: String
+    Default: ''
+    Description: PostgreSQL version, for example 17.6. Leave empty to use the RDS default version.
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Public SSM parameter that always points at the latest Ubuntu 24.04 LTS image.
+  MinSize:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: Minimum servers per tier (web and API each).
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  MaxSize:
+    Type: Number
+    Default: 4
+    MinValue: 1
+  CpuTargetPercent:
+    Type: Number
+    Default: 50
+    MinValue: 10
+    MaxValue: 90
+    Description: Auto Scaling adds or removes servers to keep average CPU near this value.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/Anubhavsaxena2004/demo_react.git
+  RepoBranch:
+    Type: String
+    Default: feature/cloudformation-architecture
+
+Conditions:
+  HasEngineVersion: !Not [!Equals [!Ref DBEngineVersion, '']]
+
+Resources:
+  # ---------------------------------------------------------------- Network: 1 VPC, 2 AZs, 3 subnet layers
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-vpc' }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-igw' }]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-public-a' }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-public-b' }]
+
+  AppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-app-a' }]
+
+  AppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-app-b' }]
+
+  DbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.20.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-db-a' }]
+
+  DbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.21.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-db-b' }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-public-rt' }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # One NAT gateway keeps the demo cheap. Production would use one per AZ so losing an AZ cannot cut off the other.
+  NatElasticIp:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-nat-ip' }]
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: [PublicDefaultRoute, PublicSubnetARouteTableAssociation]
+    Properties:
+      AllocationId: !GetAtt NatElasticIp.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-nat' }]
+
+  AppRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-app-rt' }]
+
+  AppDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  AppSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetA
+      RouteTableId: !Ref AppRouteTable
+
+  AppSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetB
+      RouteTableId: !Ref AppRouteTable
+
+  # Database subnets get a route table with no internet route at all.
+  DbRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-db-rt' }]
+
+  DbSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DbSubnetA
+      RouteTableId: !Ref DbRouteTable
+
+  DbSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DbSubnetB
+      RouteTableId: !Ref DbRouteTable
+
+  # Free gateway endpoints: S3 and DynamoDB traffic stays on the AWS network instead of going through the NAT gateway.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds: [!Ref AppRouteTable]
+
+  DynamoDbEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      RouteTableIds: [!Ref AppRouteTable]
+
+  # ---------------------------------------------------------------- Security groups: each tier accepts only the tier in front of it
+  PublicAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public load balancer - HTTP from the internet
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Browsers }
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-public-alb-sg' }]
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web tier - port 8080 from the public load balancer only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, SourceSecurityGroupId: !Ref PublicAlbSecurityGroup, Description: Public ALB }
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-web-sg' }]
+
+  InternalAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal load balancer - HTTP from the web tier only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, SourceSecurityGroupId: !Ref WebSecurityGroup, Description: Web tier }
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-internal-alb-sg' }]
+
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: API tier - port 4000 from the internal load balancer only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 4000, ToPort: 4000, SourceSecurityGroupId: !Ref InternalAlbSecurityGroup, Description: Internal ALB }
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-api-sg' }]
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database - PostgreSQL from the API tier only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref ApiSecurityGroup, Description: API tier }
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-db-sg' }]
+
+  # ---------------------------------------------------------------- Data: S3, DynamoDB, SQS, Secrets Manager, RDS
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt MediaBucket.Arn, !Sub '${MediaBucket.Arn}/*']
+            Condition: { Bool: { aws:SecureTransport: 'false' } }
+
+  ActivityTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification: { AttributeName: expiresAt, Enabled: true }
+
+  ActivityDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  ActivityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 30
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ActivityDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  DbMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub 'RDS master login for ${AWS::StackName}. Used only to create the app login.'
+      SecretString: !Sub '{"username":"${DBMasterUsername}","password":"${DBMasterPassword}"}'
+
+  AppDbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub 'Least-privilege database login the ${AWS::StackName} API uses.'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"crud_app"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private database subnets in two Availability Zones
+      SubnetIds: [!Ref DbSubnetA, !Ref DbSubnetB]
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !If [HasEngineVersion, !Ref DBEngineVersion, !Ref AWS::NoValue]
+      DBInstanceClass: !Ref DBInstanceClass
+      MultiAZ: !Ref DBMultiAZ
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DBName
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DbMasterSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DbMasterSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+
+  # ---------------------------------------------------------------- IAM: one role per tier, scoped to this stack's resources
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Web tier servers - Session Manager access only
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref WebRole]
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: API tier servers - photos, activity feed, database logins and Session Manager
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: stockroom-api
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ProductPhotos
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
+                Resource: !Sub '${MediaBucket.Arn}/items/*'
+              - Sid: ActivityQueue
+                Effect: Allow
+                Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt ActivityQueue.Arn
+              - Sid: ActivityTable
+                Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt ActivityTable.Arn
+              - Sid: DatabaseLogins
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref AppDbSecret, !Ref DbMasterSecret]
+
+  ApiInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref ApiRole]
+
+  # ---------------------------------------------------------------- Load balancers
+  # An internet-facing load balancer can only be created once the VPC has its internet gateway.
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: [InternetGatewayAttachment, PublicDefaultRoute]
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref PublicAlbSecurityGroup]
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-public-alb' }]
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: '30' }
+
+  PublicListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref WebTargetGroup }
+
+  InternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internal
+      Subnets: [!Ref AppSubnetA, !Ref AppSubnetB]
+      SecurityGroups: [!Ref InternalAlbSecurityGroup]
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-internal-alb' }]
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 4000
+      TargetType: instance
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: '30' }
+
+  InternalListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref ApiTargetGroup }
+
+  # ---------------------------------------------------------------- Compute: launch templates + Auto Scaling groups
+  # First boot clones the repo and runs infra/scripts/setup-*.sh. Log: /var/log/cloud-init-output.log on the server.
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt WebInstanceProfile.Arn }
+        SecurityGroupIds: [!Ref WebSecurityGroup]
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs: { VolumeSize: 10, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-web' }, { Key: Tier, Value: web }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            for attempt in 1 2 3 4 5; do
+              git clone --depth 1 --branch "${RepoBranch}" "${RepoUrl}" /opt/crud && break
+              rm -rf /opt/crud; sleep 15
+            done
+            BACKEND_URL="http://${InternalLoadBalancer.DNSName}" bash /opt/crud/infra/scripts/setup-web.sh
+
+  ApiLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref UbuntuAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt ApiInstanceProfile.Arn }
+        SecurityGroupIds: [!Ref ApiSecurityGroup]
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs: { VolumeSize: 10, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-api' }, { Key: Tier, Value: api }]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            for attempt in 1 2 3 4 5; do
+              git clone --depth 1 --branch "${RepoBranch}" "${RepoUrl}" /opt/crud && break
+              rm -rf /opt/crud; sleep 15
+            done
+            export AWS_REGION="${AWS::Region}" \
+              DB_HOST="${Database.Endpoint.Address}" DB_PORT="${Database.Endpoint.Port}" DB_NAME="${DBName}" \
+              DB_SECRET_ARN="${AppDbSecret}" MASTER_SECRET_ARN="${DbMasterSecret}" \
+              S3_BUCKET="${MediaBucket}" ACTIVITY_QUEUE_URL="${ActivityQueue}" ACTIVITY_TABLE="${ActivityTable}"
+            bash /opt/crud/infra/scripts/setup-api.sh
+
+  WebAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: [AppDefaultRoute, AppSubnetARouteTableAssociation, AppSubnetBRouteTableAssociation]
+    UpdatePolicy:
+      AutoScalingRollingUpdate: { MinInstancesInService: 1, MaxBatchSize: 1, PauseTime: PT5M }
+    Properties:
+      VPCZoneIdentifier: [!Ref AppSubnetA, !Ref AppSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      DesiredCapacity: !Ref DesiredCapacity
+      MaxSize: !Ref MaxSize
+      TargetGroupARNs: [!Ref WebTargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 600
+
+  ApiAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: [AppDefaultRoute, AppSubnetARouteTableAssociation, AppSubnetBRouteTableAssociation, S3Endpoint, DynamoDbEndpoint]
+    UpdatePolicy:
+      AutoScalingRollingUpdate: { MinInstancesInService: 1, MaxBatchSize: 1, PauseTime: PT5M }
+    Properties:
+      VPCZoneIdentifier: [!Ref AppSubnetA, !Ref AppSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ApiLaunchTemplate
+        Version: !GetAtt ApiLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      DesiredCapacity: !Ref DesiredCapacity
+      MaxSize: !Ref MaxSize
+      TargetGroupARNs: [!Ref ApiTargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 600
+
+  WebCpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification: { PredefinedMetricType: ASGAverageCPUUtilization }
+        TargetValue: !Ref CpuTargetPercent
+
+  ApiCpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ApiAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification: { PredefinedMetricType: ASGAverageCPUUtilization }
+        TargetValue: !Ref CpuTargetPercent
+
+Outputs:
+  AppUrl:
+    Description: Open this in a browser (allow 5-10 minutes after the stack finishes for the servers to install the app)
+    Value: !Sub 'http://${PublicLoadBalancer.DNSName}'
+  InternalApiUrl:
+    Description: Internal load balancer in front of the API tier (reachable only from the web tier)
+    Value: !Sub 'http://${InternalLoadBalancer.DNSName}'
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabaseName:
+    Value: !Ref DBName
+  MediaBucketName:
+    Description: Empty this bucket before deleting the stack
+    Value: !Ref MediaBucket
+  ActivityTableName:
+    Value: !Ref ActivityTable
+  ActivityQueueUrl:
+    Value: !Ref ActivityQueue
+  DeadLetterQueueUrl:
+    Value: !Ref ActivityDeadLetterQueue
+  DbMasterSecretArn:
+    Value: !Ref DbMasterSecret
+  AppDbSecretArn:
+    Value: !Ref AppDbSecret
+  WebAutoScalingGroupName:
+    Value: !Ref WebAutoScalingGroup
+  ApiAutoScalingGroupName:
+    Value: !Ref ApiAutoScalingGroup
+  WebTargetGroupArn:
+    Value: !Ref WebTargetGroup
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+  VpcId:
+    Value: !Ref Vpc

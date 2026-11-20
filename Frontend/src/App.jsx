@@ -5,6 +5,10 @@ const blankItem = { name: '', category: '', quantity: '', price: '' };
 const imageTypes = ['image/jpeg', 'image/png', 'image/webp'];
 const maxImageBytes = 5 * 1024 * 1024;
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const clock = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+const activityLabels = {
+  created: 'Added', updated: 'Updated', deleted: 'Deleted', 'photo-added': 'New photo for', 'photo-removed': 'Removed photo from',
+};
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -26,6 +30,10 @@ function Icon({ name }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
+function ServerChip({ tier, server }) {
+  return <span className="server-chip"><span className="server-tier">{tier}</span><code>{server ? server.id : 'n/a'}</code>{server?.zone && <span className="server-zone">{server.zone}</span>}</span>;
+}
+
 function App() {
   const [items, setItems] = useState([]);
   const [query, setQuery] = useState('');
@@ -41,6 +49,9 @@ function App() {
   const fileInput = useRef(null);
   const [zoomed, setZoomed] = useState(null);
   const lightbox = useRef(null);
+  const [servers, setServers] = useState(null);
+  const [checkingServers, setCheckingServers] = useState(false);
+  const [activity, setActivity] = useState(null);
 
   // A native <dialog> gives Escape-to-close, focus trapping and a backdrop for free.
   useEffect(() => {
@@ -73,7 +84,49 @@ function App() {
     }
   }
 
-  useEffect(() => { loadItems(); }, []);
+  // Each check is a new request, so the load balancers may hand it to a different web or API server.
+  // Only the CloudFormation stack labels its servers; elsewhere the strip stays hidden.
+  async function loadServers() {
+    setCheckingServers(true);
+    try {
+      const response = await fetch('/api/health', { cache: 'no-store' });
+      const health = await response.json();
+      const webId = response.headers.get('x-web-instance');
+      const web = webId ? { id: webId, zone: response.headers.get('x-web-zone') } : null;
+      setServers(web || health.instance ? { web, api: health.instance || null } : null);
+    } catch {
+      setServers(null);
+    } finally {
+      setCheckingServers(false);
+    }
+  }
+
+  useEffect(() => { loadItems(); loadServers(); }, []);
+
+  // Events reach DynamoDB through SQS a moment after each change, so the feed polls. A 503 means this
+  // server has no queue configured: hide the panel and stop asking.
+  useEffect(() => {
+    let timer;
+    let stopped = false;
+    async function poll() {
+      try {
+        const response = await fetch('/api/activity', { cache: 'no-store' });
+        if (response.status === 503) {
+          setActivity(null);
+          return;
+        }
+        if (response.ok) setActivity(await response.json());
+      } catch {
+        // Keep the last list and try again on the next tick.
+      }
+      if (!stopped) timer = setTimeout(poll, 4000);
+    }
+    poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, []);
 
   const filteredItems = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -182,6 +235,16 @@ function App() {
           <article className="stat-card"><span className="stat-label">Stock value</span><div className="stat-row"><strong>{money.format(inventoryValue)}</strong><span className="stat-icon blue">↗</span></div><span className="stat-note">Based on current quantities</span></article>
         </section>
 
+        {servers && (
+          <section className="served-by" aria-label="Servers that answered">
+            <span className="served-label">Served by</span>
+            <ServerChip tier="Web" server={servers.web} />
+            <span className="served-arrow" aria-hidden="true">→</span>
+            <ServerChip tier="API" server={servers.api} />
+            <button className="link-button served-refresh" type="button" onClick={loadServers} disabled={checkingServers}>{checkingServers ? 'Checking…' : 'Check again'}</button>
+          </section>
+        )}
+
         <section className="workspace">
           <aside className="form-card">
             <div className="card-heading"><div className="heading-icon"><Icon name={editingId ? 'edit' : 'plus'} /></div><div><h2>{editingId ? 'Edit product' : 'Add a product'}</h2><p>{editingId ? 'Update the details below.' : 'Add something new to your catalog.'}</p></div></div>
@@ -217,6 +280,16 @@ function App() {
             <footer className="table-footer"><span>Showing <strong>{filteredItems.length}</strong> of <strong>{items.length}</strong> products</span><span className={`api-status ${apiConnected ? '' : 'api-offline'}`}><i /> {apiConnected ? 'API and database connected' : 'Service unavailable'}</span></footer>
           </section>
         </section>
+
+        {activity && (
+          <section className="activity-card" aria-labelledby="activity-title">
+            <h2 id="activity-title">Recent activity</h2>
+            <p className="activity-note">Every change is sent to an SQS queue, and a worker saves it to DynamoDB. New events show up here within a few seconds.</p>
+            {activity.length === 0
+              ? <p className="activity-empty">No activity yet. Add or edit a product to see it arrive here.</p>
+              : <ol className="activity-list">{activity.map((event) => <li key={event.id}><span className={`activity-dot dot-${event.action}`} aria-hidden="true" /><span className="activity-text">{activityLabels[event.action] || event.action} <strong>{event.itemName}</strong></span><span className="activity-meta">{clock.format(new Date(event.at))} · queued by <code>{event.queuedBy}</code> · saved by <code>{event.savedBy}</code></span></li>)}</ol>}
+          </section>
+        )}
         <footer className="page-footer"><span>Stockroom <span>·</span> A little more organized, every day.</span><span>Made for the details.</span></footer>
       </div>
       <dialog ref={lightbox} className="lightbox" aria-label={zoomed ? `Photo of ${zoomed.name}` : 'Product photo'} onClose={() => setZoomed(null)} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>

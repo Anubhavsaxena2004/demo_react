@@ -1,10 +1,11 @@
 import express from 'express';
 import multer from 'multer';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { activityEnabled, listActivity, recordActivity, startActivityWorker } from './activity.js';
+import { databaseConfig } from './db.js';
 
 const { Pool } = pg;
 const app = express();
@@ -12,20 +13,16 @@ const host = process.env.HOST || '0.0.0.0';
 const port = Number(process.env.PORT || 4000);
 const bucket = process.env.S3_BUCKET;
 const maxImageBytes = 5 * 1024 * 1024;
+// Set by the CloudFormation launch template; the app shows it so you can watch the load balancer switch servers.
+const instance = process.env.INSTANCE_ID ? { id: process.env.INSTANCE_ID, zone: process.env.AVAILABILITY_ZONE || null } : null;
 
-if (!process.env.DATABASE_URL) {
-  console.error('DATABASE_URL is required. Set it to the private PostgreSQL connection string.');
+let pool;
+try {
+  pool = new Pool(await databaseConfig());
+} catch (error) {
+  console.error(error.message);
   process.exit(1);
 }
-
-// RDS requires TLS. DATABASE_SSL_CA points at Amazon's RDS certificate bundle so the server certificate is verified.
-function databaseSsl() {
-  if (process.env.DATABASE_SSL !== 'true') return undefined;
-  const caFile = process.env.DATABASE_SSL_CA;
-  return { rejectUnauthorized: true, ...(caFile && { ca: readFileSync(caFile, 'utf8') }) };
-}
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: databaseSsl() });
 // Credentials come from the EC2 instance's IAM role; no access keys are stored on the server.
 const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxImageBytes, files: 1 } });
@@ -94,7 +91,16 @@ app.param('id', (_req, res, next, id) => (uuidPattern.test(id) ? next() : res.st
 app.get('/api/health', async (_req, res, next) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', database: 'connected' });
+    res.json({ status: 'ok', database: 'connected', instance });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/activity', async (_req, res, next) => {
+  if (!activityEnabled) return res.status(503).json({ message: 'The activity feed is not configured on the server.' });
+  try {
+    res.set('cache-control', 'no-store').json(await listActivity());
   } catch (error) {
     next(error);
   }
@@ -118,6 +124,7 @@ app.post('/api/items', async (req, res, next) => {
       `INSERT INTO items (id, name, category, quantity, price) VALUES ($1, $2, $3, $4, $5) RETURNING ${columns}`,
       [randomUUID(), name, category, quantity, price],
     );
+    await recordActivity('created', rows[0]);
     res.status(201).json(toItem(rows[0]));
   } catch (error) {
     next(error);
@@ -134,6 +141,7 @@ app.put('/api/items/:id', async (req, res, next) => {
       [name, category, quantity, price, req.params.id],
     );
     if (!rows[0]) return res.status(404).json({ message: 'Item not found.' });
+    await recordActivity('updated', rows[0]);
     res.json(toItem(rows[0]));
   } catch (error) {
     next(error);
@@ -142,9 +150,10 @@ app.put('/api/items/:id', async (req, res, next) => {
 
 app.delete('/api/items/:id', async (req, res, next) => {
   try {
-    const { rows } = await pool.query('DELETE FROM items WHERE id = $1 RETURNING image_key', [req.params.id]);
+    const { rows } = await pool.query('DELETE FROM items WHERE id = $1 RETURNING id, name, image_key', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ message: 'Item not found.' });
     await deleteStoredImage(rows[0].image_key);
+    await recordActivity('deleted', rows[0]);
     res.status(204).end();
   } catch (error) {
     next(error);
@@ -170,6 +179,7 @@ app.post('/api/items/:id/image', requireStorage, upload.single('image'), async (
       return res.status(404).json({ message: 'Item not found.' });
     }
     await deleteStoredImage(result.previousKey);
+    await recordActivity('photo-added', result.item);
     res.json(result.item);
   } catch (error) {
     next(error);
@@ -181,6 +191,7 @@ app.delete('/api/items/:id/image', requireStorage, async (req, res, next) => {
     const result = await replaceImageKey(req.params.id, null);
     if (!result) return res.status(404).json({ message: 'Item not found.' });
     await deleteStoredImage(result.previousKey);
+    if (result.previousKey) await recordActivity('photo-removed', result.item);
     res.json(result.item);
   } catch (error) {
     next(error);
@@ -221,8 +232,10 @@ app.use((error, _req, res, _next) => {
 const server = app.listen(port, host, () => {
   console.log(`CRUD API listening on http://${host}:${port}; image bucket: ${bucket || 'not configured'}`);
 });
+const stopActivityWorker = startActivityWorker();
 
 async function shutdown() {
+  stopActivityWorker();
   server.close();
   await pool.end();
   process.exit(0);
